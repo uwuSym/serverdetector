@@ -58,7 +58,7 @@ GITHUB_FILE   = "roblox_detector_v14.py"      # ← FILL IN
 GITHUB_BRANCH = "main"
 
 # ── Discord Webhook ────────────────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL = "YOUR_WEBHOOK_URL_HERE"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1502510641439834152/VEH2fPY6u5Tum9jX1MS41QPWgmTlgb6iHIYn1nRp2iTJorMfiRZOlpf2R4eJUOJMP5Yt"
 
 # ── Discord Rich Presence ──────────────────────────────────────────────────────
 DISCORD_CLIENT_ID = "1367088498389159966"
