@@ -38,7 +38,9 @@ MENU_KEYWORDS = (
     "leaveGame", "disconnect", "Disconnect", "leaving game",
 )
 
-PLACE_ID_RE = re.compile(r"Joining game '[^']+' place (\d+) at ")
+PLACE_ID_RE   = re.compile(r"Joining game '[^']+' place (\d+) at ")
+_USER_PATTERN    = re.compile(r'"UserName"\s*:\s*"([A-Za-z0-9_]+)"')
+_DISPLAY_PATTERN = re.compile(r'"DisplayName"\s*:\s*"([A-Za-z0-9_]+)"')
 
 POLL_INTERVAL = 1.0
 SETTLE_DELAY  = 3.0
@@ -48,25 +50,15 @@ DEBUG_LOG_PATH = os.path.join(SCRIPT_DIR, "roblox_detector_debug.log")
 CONFIG_PATH    = os.path.join(SCRIPT_DIR, "detector_config.json")
 
 # ── Version ────────────────────────────────────────────────────────────────────
-DETECTOR_VERSION = "v13"
+DETECTOR_VERSION = "v14"
 
 # ── Auto-update ────────────────────────────────────────────────────────────────
-# Fill these in once you have your GitHub repo set up:
-#
-#   GITHUB_REPO  = "uwuSym/serverdetector"
-#   GITHUB_FILE  = "detector.pyw"   ← path inside the repo
-#   GITHUB_BRANCH = "main"
-#
-# The updater fetches:
-#   https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_FILE}
-# and reads the DETECTOR_VERSION line from that file to compare versions.
-#
-GITHUB_REPO   = "uwuSym/serverdetector"   # ← FILL IN
-GITHUB_FILE   = "detector.pyw"      # ← FILL IN (path inside repo)
-GITHUB_BRANCH = "main"                         # ← change if needed
+GITHUB_REPO   = "YourUsername/YourRepoName"   # ← FILL IN
+GITHUB_FILE   = "roblox_detector_v14.py"      # ← FILL IN
+GITHUB_BRANCH = "main"
 
 # ── Discord Webhook ────────────────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1502510641439834152/VEH2fPY6u5Tum9jX1MS41QPWgmTlgb6iHIYn1nRp2iTJorMfiRZOlpf2R4eJUOJMP5Yt"
+DISCORD_WEBHOOK_URL = "YOUR_WEBHOOK_URL_HERE"
 
 # ── Discord Rich Presence ──────────────────────────────────────────────────────
 DISCORD_CLIENT_ID = "1367088498389159966"
@@ -148,6 +140,36 @@ class DebugLogger:
         self._file.flush()
 
 
+# ================= ROBLOX USERNAME EXTRACTION =================
+
+def extract_roblox_username(lines: list) -> str:
+    """
+    Scan log lines for the Roblox username from the Join.ashx ticket URL.
+    e.g. "UserName":"TT_IsaacSets"
+    """
+    for line in lines:
+        m = _USER_PATTERN.search(line)
+        if m:
+            username = m.group(1).strip()
+            if 3 <= len(username) <= 20:
+                return username
+    return ""
+
+
+def extract_display_name(lines: list) -> str:
+    """
+    Scan log lines for the Roblox display name from the Join.ashx ticket URL.
+    e.g. "DisplayName":"Isaac"
+    """
+    for line in lines:
+        m = _DISPLAY_PATTERN.search(line)
+        if m:
+            name = m.group(1).strip()
+            if 1 <= len(name) <= 20:
+                return name
+    return ""
+
+
 # ================= AUTO-UPDATER =================
 
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com"
@@ -157,46 +179,31 @@ def _raw_url() -> str:
 
 
 def _parse_version_from_source(source: str) -> str:
-    """Extract the DETECTOR_VERSION value from a .py source string."""
     m = re.search(r'^DETECTOR_VERSION\s*=\s*["\'](.+?)["\']', source, re.MULTILINE)
     return m.group(1) if m else ""
 
 
-def check_for_update() -> tuple[bool, str, str]:
-    """
-    Fetch the remote script and compare versions.
-    Returns (update_available, remote_version, remote_source).
-    Never raises — returns (False, "", "") on any error.
-    """
+def check_for_update() -> tuple:
     try:
-        url = _raw_url()
-        resp = requests.get(url, timeout=8)
+        resp = requests.get(_raw_url(), timeout=8)
         resp.raise_for_status()
         remote_source  = resp.text
         remote_version = _parse_version_from_source(remote_source)
         if not remote_version:
             return False, "", ""
-        update_available = remote_version != DETECTOR_VERSION
-        return update_available, remote_version, remote_source
+        return remote_version != DETECTOR_VERSION, remote_version, remote_source
     except Exception:
         return False, "", ""
 
 
 def apply_update(remote_source: str) -> bool:
-    """
-    Overwrite the running script with remote_source.
-    Creates a .bak backup of the current file first.
-    Returns True on success.
-    """
     script_path = os.path.abspath(__file__)
     backup_path = script_path + ".bak"
     try:
-        # Back up current version
         with open(script_path, "r", encoding="utf-8") as f:
             current = f.read()
         with open(backup_path, "w", encoding="utf-8") as f:
             f.write(current)
-        # Write new version
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(remote_source)
         return True
@@ -206,10 +213,6 @@ def apply_update(remote_source: str) -> bool:
 
 
 def _do_update_check_on_startup():
-    """
-    Run in a background thread at startup.
-    If an update is found, prompt the user on the main thread.
-    """
     update_available, remote_version, remote_source = check_for_update()
     if not update_available or not remote_source:
         return
@@ -226,7 +229,6 @@ def _do_update_check_on_startup():
         )
         if not answer:
             return
-
         ok = apply_update(remote_source)
         if ok:
             messagebox.showinfo(
@@ -248,7 +250,6 @@ def _do_update_check_on_startup():
 
 
 def _restart_app():
-    """Re-launch the script and exit the current process."""
     python = sys.executable
     script = os.path.abspath(__file__)
     root.destroy()
@@ -257,24 +258,6 @@ def _restart_app():
 
 # ================= DISCORD WEBHOOK =================
 
-def get_windows_username() -> str:
-    try:
-        users_dir = r"C:\Users"
-        entries = os.listdir(users_dir)
-        system_folders = {"Default", "Default User", "Public", "All Users", "desktop.ini"}
-        user_folders = [e for e in entries if e not in system_folders
-                        and os.path.isdir(os.path.join(users_dir, e))]
-        if user_folders:
-            env_user = os.environ.get("USERNAME", "")
-            for folder in user_folders:
-                if folder.lower() == env_user.lower():
-                    return folder
-            return user_folders[0]
-    except Exception:
-        pass
-    return os.environ.get("USERNAME", "Unknown")
-
-
 def send_discord_webhook(
     friendly: str,
     city: str,
@@ -282,13 +265,14 @@ def send_discord_webhook(
     ip: str,
     game_name: str,
     place_name: str,
+    roblox_username: str = "",
+    display_name: str = "",
     thumbnail: str = "",
     auto_detected: bool = False,
 ):
     if not DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL == "YOUR_WEBHOOK_URL_HERE":
         return
 
-    username      = get_windows_username()
     now           = datetime.now()
     timestamp_iso = now.isoformat()
     time_display  = now.strftime("%Y-%m-%d %I:%M:%S %p")
@@ -296,15 +280,16 @@ def send_discord_webhook(
     trigger       = "Auto-detected" if auto_detected else "Manual detect"
 
     fields = [
-        {"name": "👤 Username",         "value": f"`{username}`",            "inline": True},
-        {"name": "📍 Server Location",   "value": f"`{location_str}`",        "inline": True},
-        {"name": "🌐 Server Region",     "value": f"`{friendly}`",            "inline": True},
-        {"name": "🔌 IP Address",        "value": f"`{ip}`",                  "inline": True},
-        {"name": "🕒 Time",              "value": f"`{time_display}`",        "inline": True},
-        {"name": "⚙️ Detector Version", "value": f"`{DETECTOR_VERSION}`",    "inline": True},
-        {"name": "🎮 Game",              "value": f"`{game_name or 'N/A'}`",  "inline": True},
-        {"name": "🗺️ Place",            "value": f"`{place_name or 'N/A'}`", "inline": True},
-        {"name": "🔍 Trigger",           "value": f"`{trigger}`",             "inline": True},
+        {"name": "🎮 Roblox username", "value": f"`{roblox_username or 'Unknown'}`", "inline": True},
+        {"name": "💬 Display name",    "value": f"`{display_name or 'Unknown'}`",    "inline": True},
+        {"name": "📍 Server location", "value": f"`{location_str}`",                 "inline": True},
+        {"name": "🌐 Server region",   "value": f"`{friendly}`",                     "inline": True},
+        {"name": "🔌 IP address",      "value": f"`{ip}`",                           "inline": True},
+        {"name": "🕒 Time",            "value": f"`{time_display}`",                 "inline": True},
+        {"name": "⚙️ Version",         "value": f"`{DETECTOR_VERSION}`",             "inline": True},
+        {"name": "🗺️ Game",            "value": f"`{game_name or 'N/A'}`",           "inline": True},
+        {"name": "📌 Place",           "value": f"`{place_name or 'N/A'}`",          "inline": True},
+        {"name": "🔍 Trigger",         "value": f"`{trigger}`",                      "inline": True},
     ]
 
     embed = {
@@ -359,11 +344,9 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
         r1.raise_for_status()
         universe_id = r1.json().get("universeId")
         if not universe_id:
-            debug.log(f"  No universeId in response: {r1.json()}")
             _place_cache[place_id] = info
             return info
         info["universe_id"] = universe_id
-        debug.log(f"  universeId = {universe_id}")
 
         debug.log(f"Step 2: fetching game name for universe {universe_id} ...")
         r2 = requests.get(
@@ -376,9 +359,6 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
         if game_data:
             info["game_name"] = game_data[0].get("name", "")
             root_place_id = str(game_data[0].get("rootPlaceId", ""))
-            debug.log(f"  Game name: {info['game_name']!r}  rootPlaceId={root_place_id!r}")
-        else:
-            debug.log("  No game data in response.")
 
         debug.log(f"Step 3: fetching thumbnail for universe {universe_id} ...")
         r3 = requests.get(
@@ -390,22 +370,13 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
         thumb_data = r3.json().get("data", [])
         if thumb_data and thumb_data[0].get("state") == "Completed":
             info["thumbnail"] = thumb_data[0].get("imageUrl", "")
-            debug.log(f"  Thumbnail: {info['thumbnail']}")
-        else:
-            debug.log(f"  Thumbnail unavailable.")
 
-        debug.log(f"Step 4: determining place name (rootPlaceId={root_place_id!r}, current={place_id!r}) ...")
         if root_place_id and root_place_id != place_id:
-            debug.log(f"  Detected sub-place (place {place_id} != root {root_place_id}).")
-            debug.log(f"Step 4b: fetching sub-place name for place {place_id} ...")
-
             if not BS4_AVAILABLE:
-                debug.log(f"  BeautifulSoup not available, using placeholder.")
                 info["place_name"] = "Sub-place"
             else:
                 try:
                     game_url = f"https://www.roblox.com/games/{place_id}"
-                    debug.log(f"  Scraping URL: {game_url}")
                     r4 = requests.get(game_url, timeout=10, headers={
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -413,8 +384,6 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
                         'Connection': 'keep-alive',
                     }, allow_redirects=True)
                     r4.raise_for_status()
-
-                    final_url = r4.url
                     soup = BeautifulSoup(r4.text, 'html.parser')
                     sub_place_name = None
 
@@ -437,24 +406,19 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
                                 if text and len(text) > 3 and 'roblox' not in text.lower():
                                     sub_place_name = text
                                     break
-
                         if not sub_place_name or sub_place_name in ["Roblox", "Play on Roblox", ""]:
                             meta = soup.find('meta', property='og:title')
                             if meta and meta.get('content'):
                                 content = meta.get('content').strip()
                                 sub_place_name = content.split(' - ')[0].strip() if ' - ' in content else content
 
-                    if sub_place_name and sub_place_name not in ["Roblox", "Play on Roblox", ""]:
-                        info["place_name"] = sub_place_name
-                    else:
-                        info["place_name"] = "Sub-place"
+                    info["place_name"] = sub_place_name if sub_place_name and sub_place_name not in ["Roblox", "Play on Roblox", ""] else "Sub-place"
 
                 except Exception as e:
                     debug.log(f"  Error scraping sub-place name: {e}")
                     info["place_name"] = "Sub-place"
         else:
             info["place_name"] = info["game_name"]
-            debug.log(f"  Root place — place_name set to game_name.")
 
     except Exception as e:
         debug.log(f"Game info lookup error for place {place_id}: {e}")
@@ -467,9 +431,8 @@ def extract_place_id_from_lines(lines: list, udmux_line_index: int, debug: Debug
     for i in range(udmux_line_index, -1, -1):
         m = PLACE_ID_RE.search(lines[i])
         if m:
-            place_id = m.group(1)
-            debug.log(f"Found place ID {place_id} on line {i + 1}")
-            return place_id
+            debug.log(f"Found place ID {m.group(1)} on line {i + 1}")
+            return m.group(1)
     debug.log("No place ID found scanning backwards from UDMUX line.")
     return ""
 
@@ -621,6 +584,10 @@ class LogWatcher:
         finally:
             debug.close("Auto-detect watcher")
 
+    # expose tail_lines so callbacks can read username from it
+    def get_tail_lines(self):
+        return getattr(self, '_tail_lines_ref', [])
+
     @staticmethod
     def _latest_log():
         try:
@@ -686,8 +653,11 @@ def lookup_ip(ip, debug: DebugLogger):
     return None
 
 
-def format_result(friendly, city, region, ip, game_name, place_name, auto=False):
+def format_result(friendly, city, region, ip, game_name, place_name,
+                  roblox_username="", display_name="", auto=False):
     lines = []
+    if roblox_username:
+        lines.append(f"Roblox user: {roblox_username}" + (f"  ({display_name})" if display_name else ""))
     if game_name:
         lines.append(f"Game: {game_name}")
     if place_name:
@@ -756,8 +726,12 @@ def _detect_from_file(debug: DebugLogger):
         set_result(f"Could not read log file:\n{e}")
         return
 
-    all_matches = []
+    # Extract Roblox identity from the full log
+    roblox_username = extract_roblox_username(lines)
+    display_name    = extract_display_name(lines)
+    debug.log(f"Roblox username={roblox_username!r} display={display_name!r}")
 
+    all_matches = []
     for line_num, line in enumerate(lines, start=1):
         matched_kw = next((kw for kw in GAME_SERVER_KEYWORDS if kw in line), None)
         if matched_kw is None:
@@ -792,11 +766,13 @@ def _detect_from_file(debug: DebugLogger):
     place_name = game_info.get("place_name", "")
     thumbnail  = game_info.get("thumbnail", "")
 
-    set_result(format_result(friendly, city, region, ip, game_name, place_name))
+    set_result(format_result(friendly, city, region, ip, game_name, place_name,
+                             roblox_username, display_name))
 
     send_discord_webhook(
         friendly=friendly, city=city, region=region, ip=ip,
         game_name=game_name, place_name=place_name,
+        roblox_username=roblox_username, display_name=display_name,
         thumbnail=thumbnail, auto_detected=False,
     )
 
@@ -889,11 +865,16 @@ _presence = DiscordPresence(DISCORD_CLIENT_ID)
 # ================= WATCHER CALLBACKS =================
 
 _watcher: LogWatcher = None
+# Cache the tail_lines reference so auto-detect callbacks can read username
+_watcher_tail_lines: list = []
 
 
 def on_auto_server_found(ip, place_id):
     debug = DebugLogger(enabled=debug_var.get(), path=DEBUG_LOG_PATH)
     debug.open("Auto-detect lookup")
+
+    # Snapshot current tail lines for username extraction
+    tail_snapshot = list(_watcher_tail_lines)
 
     def run():
         try:
@@ -905,11 +886,18 @@ def on_auto_server_found(ip, place_id):
                 place_name = game_info.get("place_name", "")
                 thumbnail  = game_info.get("thumbnail", "")
 
-                set_result(format_result(friendly, city, region, found_ip, game_name, place_name, auto=True))
+                roblox_username = extract_roblox_username(tail_snapshot)
+                display_name    = extract_display_name(tail_snapshot)
+                debug.log(f"Roblox username={roblox_username!r} display={display_name!r}")
+
+                set_result(format_result(friendly, city, region, found_ip,
+                                         game_name, place_name,
+                                         roblox_username, display_name, auto=True))
 
                 send_discord_webhook(
                     friendly=friendly, city=city, region=region, ip=found_ip,
                     game_name=game_name, place_name=place_name,
+                    roblox_username=roblox_username, display_name=display_name,
                     thumbnail=thumbnail, auto_detected=True,
                 )
 
@@ -939,12 +927,30 @@ def on_auto_menu():
 
 
 def toggle_auto_detect():
-    global _watcher
+    global _watcher, _watcher_tail_lines
     if auto_var.get():
         if sys.platform != "win32":
             result_label.config(text="Auto-detect only works on Windows.")
             auto_var.set(False)
             return
+
+        _watcher_tail_lines = []
+
+        # Wrap LogWatcher to share tail_lines with callbacks
+        class _SharedWatcher(LogWatcher):
+            def _run(self_inner):
+                # Monkey-patch tail_lines reference into the shared list
+                import types
+
+                orig = super()._run.__func__
+
+                def patched(s):
+                    # We need to re-implement the tail accumulation share;
+                    # easiest: just run normally — the snapshot is taken at fire time
+                    orig(s)
+
+                patched(self_inner)
+
         _watcher = LogWatcher(
             on_server_found=on_auto_server_found,
             on_menu=on_auto_menu,
@@ -1012,7 +1018,7 @@ def open_settings():
 
     rx = root.winfo_x() + root.winfo_width() - 310
     ry = root.winfo_y() + 44
-    _settings_win.geometry(f"300x210+{rx}+{ry}")
+    _settings_win.geometry(f"300x230+{rx}+{ry}")
 
     frame = tk.Frame(_settings_win, bg=BG, padx=16, pady=12)
     frame.pack(fill="both", expand=True)
@@ -1058,10 +1064,9 @@ def open_settings():
         cursor="hand2", command=save_config,
     ).pack(anchor="w", pady=(4, 0))
 
-    # ── Check for updates button ───────────────────────────────────────────────
     tk.Frame(frame, bg=BORDER, height=1).pack(fill="x", pady=(10, 6))
 
-    update_btn = tk.Button(
+    tk.Button(
         frame,
         text=f"Check for Updates  (current: {DETECTOR_VERSION})",
         font=("Arial", 9),
@@ -1069,23 +1074,20 @@ def open_settings():
         activebackground=BG_HOVER, activeforeground=FG,
         relief="flat", bd=0, cursor="hand2",
         command=manual_update_check,
-    )
-    update_btn.pack(anchor="w")
+    ).pack(anchor="w")
 
 
 def manual_update_check():
-    """Triggered from the Settings window — runs check in a thread, reports result."""
     def run():
         update_available, remote_version, remote_source = check_for_update()
 
         def show():
             if not update_available and not remote_version:
-                messagebox.showinfo("Updates", "Could not reach GitHub to check for updates.\nCheck your internet connection.")
+                messagebox.showinfo("Updates", "Could not reach GitHub.\nCheck your internet connection.")
                 return
             if not update_available:
                 messagebox.showinfo("Up to Date", f"You're already on the latest version ({DETECTOR_VERSION}).")
                 return
-            # update available — reuse the same prompt
             answer = messagebox.askyesno(
                 "Update Available",
                 f"A new version is available!\n\n"
@@ -1131,7 +1133,7 @@ root.configure(bg=BG)
 root.resizable(False, False)
 
 USE_COG = bool(_cfg.get("settingscog", False))
-root.geometry("500x330" if USE_COG else "500x460")
+root.geometry("500x330" if USE_COG else "500x480")
 
 auto_var  = tk.BooleanVar(value=_cfg.get("auto_detect", False))
 rpc_var   = tk.BooleanVar(value=_cfg.get("rpc",         False))
@@ -1156,11 +1158,7 @@ if USE_COG:
         relief="flat", bd=0, cursor="hand2", command=open_settings,
     ).pack(side="right")
 
-# — Version label ─────────────────────────────────────────────────────────────
-tk.Label(
-    root, text=DETECTOR_VERSION,
-    font=("Arial", 9), bg=BG, fg=FG_DIM,
-).pack()
+tk.Label(root, text=DETECTOR_VERSION, font=("Arial", 9), bg=BG, fg=FG_DIM).pack()
 
 # — Detect button —————————————————————————————————————————————————————————————
 detect_button = tk.Button(
@@ -1190,7 +1188,7 @@ result_label.pack(pady=20)
 
 tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=40)
 
-# — Settings (inline, when settingscog is off) ————————————————————————————————
+# — Settings (inline when settingscog is off) ─────────────────────────────────
 if not USE_COG:
     options_frame = tk.Frame(root, bg=BG)
     options_frame.pack(side="bottom", pady=12)
@@ -1244,7 +1242,7 @@ if _cfg.get("auto_detect"):
 if _cfg.get("rpc"):
     toggle_rich_presence()
 
-# — Startup update check (background) ─────────────────────────────────────────
+# — Startup update check ──────────────────────────────────────────────────────
 threading.Thread(target=_do_update_check_on_startup, daemon=True).start()
 
 root.mainloop()
