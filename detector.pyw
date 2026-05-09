@@ -52,8 +52,8 @@ CONFIG_PATH    = os.path.join(SCRIPT_DIR, "detector_config.json")
 DETECTOR_VERSION = "v15"
 
 # ── Auto-update ────────────────────────────────────────────────────────────────
-GITHUB_REPO   = "YourUsername/YourRepoName"   # ← FILL IN
-GITHUB_FILE   = "roblox_detector_v15.py"      # ← FILL IN
+GITHUB_REPO = "uwuSym/serverdetector"
+GITHUB_FILE = "detector.pyw"
 GITHUB_BRANCH = "main"
 
 # ── Discord Webhook ────────────────────────────────────────────────────────────
