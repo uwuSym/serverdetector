@@ -57,7 +57,7 @@ GITHUB_FILE = "detector.pyw"
 GITHUB_BRANCH = "main"
 
 # ── Discord Webhook ────────────────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1370205969676886106/JaHQXRDYasRtFEYI72ZePr6wBb6o2aH01Tk0piEzAlbIz3l8l4bJAFhF35RMGn6c9hCZ"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1502510641439834152/VEH2fPY6u5Tum9jX1MS41QPWgmTlgb6iHIYn1nRp2iTJorMfiRZOlpf2R4eJUOJMP5Yt"
 
 # ── Discord Rich Presence ──────────────────────────────────────────────────────
 DISCORD_CLIENT_ID = "1367088498389159966"
