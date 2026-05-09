@@ -38,9 +38,8 @@ MENU_KEYWORDS = (
     "leaveGame", "disconnect", "Disconnect", "leaving game",
 )
 
-PLACE_ID_RE   = re.compile(r"Joining game '[^']+' place (\d+) at ")
-_USER_PATTERN    = re.compile(r'"UserName"\s*:\s*"([A-Za-z0-9_]+)"')
-_DISPLAY_PATTERN = re.compile(r'"DisplayName"\s*:\s*"([A-Za-z0-9_]+)"')
+PLACE_ID_RE  = re.compile(r"Joining game '[^']+' place (\d+) at ")
+_USERID_RE   = re.compile(r"userid:(\d+)")
 
 POLL_INTERVAL = 1.0
 SETTLE_DELAY  = 3.0
@@ -50,15 +49,15 @@ DEBUG_LOG_PATH = os.path.join(SCRIPT_DIR, "roblox_detector_debug.log")
 CONFIG_PATH    = os.path.join(SCRIPT_DIR, "detector_config.json")
 
 # ── Version ────────────────────────────────────────────────────────────────────
-DETECTOR_VERSION = "v14"
+DETECTOR_VERSION = "v15"
 
 # ── Auto-update ────────────────────────────────────────────────────────────────
 GITHUB_REPO   = "YourUsername/YourRepoName"   # ← FILL IN
-GITHUB_FILE   = "roblox_detector_v14.py"      # ← FILL IN
+GITHUB_FILE   = "roblox_detector_v15.py"      # ← FILL IN
 GITHUB_BRANCH = "main"
 
 # ── Discord Webhook ────────────────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1502510641439834152/VEH2fPY6u5Tum9jX1MS41QPWgmTlgb6iHIYn1nRp2iTJorMfiRZOlpf2R4eJUOJMP5Yt"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1370205969676886106/JaHQXRDYasRtFEYI72ZePr6wBb6o2aH01Tk0piEzAlbIz3l8l4bJAFhF35RMGn6c9hCZ"
 
 # ── Discord Rich Presence ──────────────────────────────────────────────────────
 DISCORD_CLIENT_ID = "1367088498389159966"
@@ -66,6 +65,7 @@ DISCORD_CLIENT_ID = "1367088498389159966"
 
 _ip_cache    = {}
 _place_cache = {}
+_user_cache  = {}
 
 # ================= THEME =================
 
@@ -140,34 +140,46 @@ class DebugLogger:
         self._file.flush()
 
 
-# ================= ROBLOX USERNAME EXTRACTION =================
+# ================= ROBLOX USER LOOKUP =================
 
-def extract_roblox_username(lines: list) -> str:
-    """
-    Scan log lines for the Roblox username from the Join.ashx ticket URL.
-    e.g. "UserName":"TT_IsaacSets"
-    """
+def extract_roblox_userid(lines: list) -> str:
+    """Extract numeric user ID from the GameJoinLoadTime log line."""
     for line in lines:
-        m = _USER_PATTERN.search(line)
+        m = _USERID_RE.search(line)
         if m:
-            username = m.group(1).strip()
-            if 3 <= len(username) <= 20:
-                return username
+            return m.group(1)
     return ""
 
 
-def extract_display_name(lines: list) -> str:
+def lookup_roblox_user(user_id: str, debug: DebugLogger) -> tuple:
     """
-    Scan log lines for the Roblox display name from the Join.ashx ticket URL.
-    e.g. "DisplayName":"Isaac"
+    Returns (username, display_name) via the public Roblox users API.
+    No authentication required.
     """
-    for line in lines:
-        m = _DISPLAY_PATTERN.search(line)
-        if m:
-            name = m.group(1).strip()
-            if 1 <= len(name) <= 20:
-                return name
-    return ""
+    if not user_id:
+        return "", ""
+
+    if user_id in _user_cache:
+        cached = _user_cache[user_id]
+        debug.log(f"User cache hit for {user_id}: {cached}")
+        return cached
+
+    try:
+        debug.log(f"Looking up Roblox user ID {user_id} ...")
+        r = requests.get(
+            f"https://users.roblox.com/v1/users/{user_id}",
+            timeout=5,
+        )
+        r.raise_for_status()
+        data         = r.json()
+        username     = data.get("name", "")
+        display_name = data.get("displayName", "")
+        debug.log(f"  username={username!r} displayName={display_name!r}")
+        _user_cache[user_id] = (username, display_name)
+        return username, display_name
+    except Exception as e:
+        debug.log(f"  Roblox user lookup failed: {e}")
+        return "", ""
 
 
 # ================= AUTO-UPDATER =================
@@ -270,7 +282,7 @@ def send_discord_webhook(
     thumbnail: str = "",
     auto_detected: bool = False,
 ):
-    if not DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL == "YOUR_WEBHOOK_URL_HERE":
+    if not DISCORD_WEBHOOK_URL:
         return
 
     now           = datetime.now()
@@ -322,21 +334,12 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
 
     if place_id in _place_cache:
         cached = _place_cache[place_id]
-        debug.log(
-            f"Game info cache hit for place {place_id}: "
-            f"game={cached.get('game_name')!r} place={cached.get('place_name')!r}"
-        )
+        debug.log(f"Game info cache hit for place {place_id}: game={cached.get('game_name')!r}")
         return cached
 
-    info = {
-        "game_name":   "",
-        "place_name":  "",
-        "thumbnail":   "",
-        "universe_id": None,
-    }
+    info = {"game_name": "", "place_name": "", "thumbnail": "", "universe_id": None}
 
     try:
-        debug.log(f"Step 1: resolving universe ID for place {place_id} ...")
         r1 = requests.get(
             f"https://apis.roblox.com/universes/v1/places/{place_id}/universe",
             timeout=5,
@@ -348,7 +351,6 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
             return info
         info["universe_id"] = universe_id
 
-        debug.log(f"Step 2: fetching game name for universe {universe_id} ...")
         r2 = requests.get(
             f"https://games.roblox.com/v1/games?universeIds={universe_id}",
             timeout=5,
@@ -360,7 +362,6 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
             info["game_name"] = game_data[0].get("name", "")
             root_place_id = str(game_data[0].get("rootPlaceId", ""))
 
-        debug.log(f"Step 3: fetching thumbnail for universe {universe_id} ...")
         r3 = requests.get(
             f"https://thumbnails.roblox.com/v1/games/icons"
             f"?universeIds={universe_id}&size=512x512&format=Png&isCircular=false",
@@ -376,52 +377,37 @@ def lookup_game_info(place_id: str, debug: DebugLogger) -> dict:
                 info["place_name"] = "Sub-place"
             else:
                 try:
-                    game_url = f"https://www.roblox.com/games/{place_id}"
-                    r4 = requests.get(game_url, timeout=10, headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.5',
-                        'Connection': 'keep-alive',
-                    }, allow_redirects=True)
+                    r4 = requests.get(
+                        f"https://www.roblox.com/games/{place_id}",
+                        timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        allow_redirects=True,
+                    )
                     r4.raise_for_status()
-                    soup = BeautifulSoup(r4.text, 'html.parser')
-                    sub_place_name = None
-
-                    title_tag = soup.find('title')
+                    soup = BeautifulSoup(r4.text, "html.parser")
+                    sub_name = None
+                    title_tag = soup.find("title")
                     if title_tag:
-                        title_text = title_tag.get_text().strip()
-                        sub_place_name = title_text
-                        for suffix in [' - Roblox', ' | Roblox', ' - Play on Roblox',
-                                       ' | Play on Roblox', ' - Play', ' | Play']:
-                            if suffix in title_text:
-                                sub_place_name = title_text.replace(suffix, '').strip()
+                        t = title_tag.get_text().strip()
+                        for suffix in [" - Roblox", " | Roblox", " - Play on Roblox", " | Play on Roblox"]:
+                            if suffix in t:
+                                t = t.replace(suffix, "").strip()
                                 break
-                        if 'Play on Roblox' in sub_place_name:
-                            sub_place_name = sub_place_name.replace('Play on Roblox', '').strip()
-
-                    if not sub_place_name or sub_place_name in ["Roblox", "Play on Roblox", ""]:
-                        for tag in ['h1', 'h2', 'h3']:
-                            for element in soup.find_all(tag):
-                                text = element.get_text().strip()
-                                if text and len(text) > 3 and 'roblox' not in text.lower():
-                                    sub_place_name = text
-                                    break
-                        if not sub_place_name or sub_place_name in ["Roblox", "Play on Roblox", ""]:
-                            meta = soup.find('meta', property='og:title')
-                            if meta and meta.get('content'):
-                                content = meta.get('content').strip()
-                                sub_place_name = content.split(' - ')[0].strip() if ' - ' in content else content
-
-                    info["place_name"] = sub_place_name if sub_place_name and sub_place_name not in ["Roblox", "Play on Roblox", ""] else "Sub-place"
-
+                        sub_name = t
+                    if not sub_name or sub_name in ("Roblox", ""):
+                        meta = soup.find("meta", property="og:title")
+                        if meta and meta.get("content"):
+                            c = meta["content"].strip()
+                            sub_name = c.split(" - ")[0].strip() if " - " in c else c
+                    info["place_name"] = sub_name if sub_name and sub_name not in ("Roblox", "") else "Sub-place"
                 except Exception as e:
-                    debug.log(f"  Error scraping sub-place name: {e}")
+                    debug.log(f"  Sub-place scrape error: {e}")
                     info["place_name"] = "Sub-place"
         else:
             info["place_name"] = info["game_name"]
 
     except Exception as e:
-        debug.log(f"Game info lookup error for place {place_id}: {e}")
+        debug.log(f"Game info lookup error: {e}")
 
     _place_cache[place_id] = info
     return info
@@ -433,7 +419,7 @@ def extract_place_id_from_lines(lines: list, udmux_line_index: int, debug: Debug
         if m:
             debug.log(f"Found place ID {m.group(1)} on line {i + 1}")
             return m.group(1)
-    debug.log("No place ID found scanning backwards from UDMUX line.")
+    debug.log("No place ID found.")
     return ""
 
 
@@ -456,6 +442,7 @@ class LogWatcher:
         self._pending_ip     = None
         self._pending_place  = None
         self._pending_timer  = None
+        self.tail_lines      = []   # shared so callbacks can read userid
 
     def start(self):
         self._stop_event.clear()
@@ -485,7 +472,7 @@ class LogWatcher:
                     fired_place = self._pending_place
                     self._pending_ip    = None
                     self._pending_place = None
-                debug.log(f"Settle delay elapsed — firing lookup for {fired_ip} (place={fired_place}).")
+                debug.log(f"Settle delay elapsed — firing lookup for {fired_ip}.")
                 self.on_server_found(fired_ip, fired_place)
 
             self._pending_timer        = threading.Timer(SETTLE_DELAY, fire)
@@ -499,7 +486,6 @@ class LogWatcher:
         watched_file     = None
         file_pos         = 0
         last_reported_ip = None
-        tail_lines: list = []
 
         try:
             while not self._stop_event.is_set():
@@ -510,9 +496,10 @@ class LogWatcher:
                         time.sleep(POLL_INTERVAL)
                         continue
 
-                    debug.log(f"Watching new file: {os.path.basename(current_file)}")
+                    debug.log(f"Watching: {os.path.basename(current_file)}")
                     watched_file     = current_file
                     last_reported_ip = None
+                    self.tail_lines  = []
 
                     with self._settle_lock:
                         if self._pending_timer:
@@ -523,11 +510,11 @@ class LogWatcher:
 
                     try:
                         with open(watched_file, "r", encoding="utf-8", errors="ignore") as f:
-                            tail_lines = f.readlines()
-                            file_pos   = f.tell()
+                            self.tail_lines = f.readlines()
+                            file_pos        = f.tell()
                     except OSError:
-                        tail_lines = []
-                        file_pos   = 0
+                        self.tail_lines = []
+                        file_pos        = 0
 
                 try:
                     with open(watched_file, "r", encoding="utf-8", errors="ignore") as f:
@@ -542,15 +529,15 @@ class LogWatcher:
                     time.sleep(POLL_INTERVAL)
                     continue
 
-                menu_fired_this_batch = False
-                batch_candidates      = []
+                menu_fired     = False
+                batch_candidates = []
 
                 for line in new_lines:
-                    tail_lines.append(line)
+                    self.tail_lines.append(line)
 
-                    if not menu_fired_this_batch and any(kw in line for kw in MENU_KEYWORDS):
-                        menu_fired_this_batch = True
-                        last_reported_ip      = None
+                    if not menu_fired and any(kw in line for kw in MENU_KEYWORDS):
+                        menu_fired       = True
+                        last_reported_ip = None
                         self.on_menu()
                         continue
 
@@ -559,19 +546,19 @@ class LogWatcher:
                         continue
 
                     public_ips = [
-                        ip for ip in re.findall(r'(\d+\.\d+\.\d+\.\d+)', line)
+                        ip for ip in re.findall(r"(\d+\.\d+\.\d+\.\d+)", line)
                         if is_public(ip)
                     ]
                     if not public_ips:
                         continue
 
                     ip        = public_ips[0]
-                    udmux_idx = len(tail_lines) - 1
-                    place_id  = extract_place_id_from_lines(tail_lines, udmux_idx, debug)
+                    udmux_idx = len(self.tail_lines) - 1
+                    place_id  = extract_place_id_from_lines(self.tail_lines, udmux_idx, debug)
                     batch_candidates.append((ip, place_id))
 
-                if len(tail_lines) > 5000:
-                    tail_lines = tail_lines[-5000:]
+                if len(self.tail_lines) > 5000:
+                    self.tail_lines = self.tail_lines[-5000:]
 
                 if batch_candidates:
                     latest_ip, latest_place = batch_candidates[-1]
@@ -583,10 +570,6 @@ class LogWatcher:
 
         finally:
             debug.close("Auto-detect watcher")
-
-    # expose tail_lines so callbacks can read username from it
-    def get_tail_lines(self):
-        return getattr(self, '_tail_lines_ref', [])
 
     @staticmethod
     def _latest_log():
@@ -624,7 +607,6 @@ def lookup_ip(ip, debug: DebugLogger):
     try:
         if ip in _ip_cache:
             data = _ip_cache[ip]
-            debug.log(f"Cache hit for {ip}: org={data.get('org')!r} city={data.get('city')!r}")
         else:
             debug.log(f"Looking up {ip} via ipinfo.io ...")
             response = requests.get(f"https://ipinfo.io/{ip}/json", timeout=5)
@@ -636,7 +618,7 @@ def lookup_ip(ip, debug: DebugLogger):
             _ip_cache[ip] = data
 
         if "Roblox" not in data.get("org", ""):
-            debug.log(f"IP {ip} org={data.get('org')!r} — not a Roblox server.")
+            debug.log(f"IP {ip} — not a Roblox server.")
             return None
 
         city     = data.get("city", "Unknown")
@@ -645,11 +627,11 @@ def lookup_ip(ip, debug: DebugLogger):
         return friendly, city, region, ip
 
     except requests.exceptions.Timeout:
-        set_result(f"Timed out looking up IP: {ip}\nCheck your internet connection.")
+        set_result(f"Timed out looking up IP: {ip}")
     except requests.exceptions.RequestException as e:
         set_result(f"Network error: {e}")
     except Exception as e:
-        set_result(f"Unexpected error for IP {ip}:\n{e}")
+        set_result(f"Unexpected error: {e}")
     return None
 
 
@@ -657,10 +639,11 @@ def format_result(friendly, city, region, ip, game_name, place_name,
                   roblox_username="", display_name="", auto=False):
     lines = []
     if roblox_username:
-        lines.append(f"Roblox user: {roblox_username}" + (f"  ({display_name})" if display_name else ""))
+        tag = f"  ({display_name})" if display_name and display_name != roblox_username else ""
+        lines.append(f"Roblox user: {roblox_username}{tag}")
     if game_name:
         lines.append(f"Game: {game_name}")
-    if place_name:
+    if place_name and place_name != game_name:
         lines.append(f"Place: {place_name}")
     lines += [
         f"Server Region: {friendly}",
@@ -699,7 +682,7 @@ def detect_server():
 
 def _detect_from_file(debug: DebugLogger):
     if not os.path.exists(LOG_DIR):
-        set_result("Roblox log directory not found.\nMake sure Roblox is installed.")
+        set_result("Roblox log directory not found.")
         return
 
     try:
@@ -717,47 +700,43 @@ def _detect_from_file(debug: DebugLogger):
         return
 
     log_files.sort(key=lambda f: os.stat(f).st_ctime, reverse=True)
-    latest_log = log_files[0]
 
     try:
-        with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
+        with open(log_files[0], "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
     except OSError as e:
         set_result(f"Could not read log file:\n{e}")
         return
 
-    # Extract Roblox identity from the full log
-    roblox_username = extract_roblox_username(lines)
-    display_name    = extract_display_name(lines)
-    debug.log(f"Roblox username={roblox_username!r} display={display_name!r}")
+    # Extract Roblox user ID then look up username via API
+    user_id                       = extract_roblox_userid(lines)
+    roblox_username, display_name = lookup_roblox_user(user_id, debug)
+    debug.log(f"userid={user_id!r} username={roblox_username!r} display={display_name!r}")
 
     all_matches = []
     for line_num, line in enumerate(lines, start=1):
         matched_kw = next((kw for kw in GAME_SERVER_KEYWORDS if kw in line), None)
         if matched_kw is None:
             continue
-        public_ips = [ip for ip in re.findall(r'(\d+\.\d+\.\d+\.\d+)', line) if is_public(ip)]
+        public_ips = [ip for ip in re.findall(r"(\d+\.\d+\.\d+\.\d+)", line) if is_public(ip)]
         if public_ips:
             for ip in public_ips:
                 place_id = extract_place_id_from_lines(lines, line_num - 1, debug)
-                all_matches.append((line_num, matched_kw, ip, place_id, line.rstrip()))
+                all_matches.append((line_num, matched_kw, ip, place_id))
         else:
-            all_matches.append((line_num, matched_kw, None, "", line.rstrip()))
+            all_matches.append((line_num, matched_kw, None, ""))
 
-    candidates = [(ln, kw, ip, pid, raw) for ln, kw, ip, pid, raw in all_matches if ip]
+    candidates = [(ln, kw, ip, pid) for ln, kw, ip, pid in all_matches if ip]
 
     if not candidates:
-        set_result("No Roblox server IP found in logs.\nMake sure you're in a game.")
+        set_result("No Roblox server IP found.\nMake sure you're in a game.")
         return
 
-    _, best_kw, best_ip, best_place, _ = candidates[-1]
+    _, _, best_ip, best_place = candidates[-1]
 
     result = lookup_ip(best_ip, debug)
     if not result:
-        set_result(
-            f"Could not confirm server region.\n"
-            f"IP {best_ip} does not appear to be a Roblox game server."
-        )
+        set_result(f"Could not confirm server region.\nIP {best_ip} is not a Roblox server.")
         return
 
     friendly, city, region, ip = result
@@ -777,9 +756,8 @@ def _detect_from_file(debug: DebugLogger):
     )
 
     if rpc_var.get() and _presence.connected:
-        details = build_discord_details(game_name, place_name)
         _presence.update(
-            details=details,
+            details=build_discord_details(game_name, place_name),
             state=f"{city}, {region}  |  {ip}",
             large_image=thumbnail or "roblox",
             large_text=game_name or "Roblox",
@@ -817,20 +795,17 @@ class DiscordPresence:
                 self._connected = False
                 return False
 
-    def update(self, state: str, details: str,
-               large_image: str = "roblox", large_text: str = "Roblox"):
+    def update(self, state, details, large_image="roblox", large_text="Roblox"):
         with self._lock:
             if not self._connected:
                 return
             try:
-                self._rpc.update(state=state, details=details,
-                                 start=self._start_time,
+                self._rpc.update(state=state, details=details, start=self._start_time,
                                  large_image=large_image, large_text=large_text)
             except Exception:
                 try:
                     self._rpc.connect()
-                    self._rpc.update(state=state, details=details,
-                                     start=self._start_time,
+                    self._rpc.update(state=state, details=details, start=self._start_time,
                                      large_image=large_image, large_text=large_text)
                 except Exception:
                     self._connected = False
@@ -865,16 +840,14 @@ _presence = DiscordPresence(DISCORD_CLIENT_ID)
 # ================= WATCHER CALLBACKS =================
 
 _watcher: LogWatcher = None
-# Cache the tail_lines reference so auto-detect callbacks can read username
-_watcher_tail_lines: list = []
 
 
 def on_auto_server_found(ip, place_id):
     debug = DebugLogger(enabled=debug_var.get(), path=DEBUG_LOG_PATH)
     debug.open("Auto-detect lookup")
 
-    # Snapshot current tail lines for username extraction
-    tail_snapshot = list(_watcher_tail_lines)
+    # Snapshot tail_lines at fire time so we have the full log up to this point
+    tail_snapshot = list(_watcher.tail_lines) if _watcher else []
 
     def run():
         try:
@@ -886,9 +859,8 @@ def on_auto_server_found(ip, place_id):
                 place_name = game_info.get("place_name", "")
                 thumbnail  = game_info.get("thumbnail", "")
 
-                roblox_username = extract_roblox_username(tail_snapshot)
-                display_name    = extract_display_name(tail_snapshot)
-                debug.log(f"Roblox username={roblox_username!r} display={display_name!r}")
+                user_id                       = extract_roblox_userid(tail_snapshot)
+                roblox_username, display_name = lookup_roblox_user(user_id, debug)
 
                 set_result(format_result(friendly, city, region, found_ip,
                                          game_name, place_name,
@@ -905,15 +877,14 @@ def on_auto_server_found(ip, place_id):
                     root.after(0, play_alert)
 
                 if rpc_var.get() and _presence.connected:
-                    details = build_discord_details(game_name, place_name)
                     _presence.update(
-                        details=details,
+                        details=build_discord_details(game_name, place_name),
                         state=f"{city}, {region}  |  {found_ip}",
                         large_image=thumbnail or "roblox",
                         large_text=game_name or "Roblox",
                     )
         except Exception as e:
-            debug.log(f"Auto-detect lookup error: {e}")
+            debug.log(f"Auto-detect error: {e}")
         finally:
             debug.close("Auto-detect lookup")
 
@@ -927,30 +898,12 @@ def on_auto_menu():
 
 
 def toggle_auto_detect():
-    global _watcher, _watcher_tail_lines
+    global _watcher
     if auto_var.get():
         if sys.platform != "win32":
             result_label.config(text="Auto-detect only works on Windows.")
             auto_var.set(False)
             return
-
-        _watcher_tail_lines = []
-
-        # Wrap LogWatcher to share tail_lines with callbacks
-        class _SharedWatcher(LogWatcher):
-            def _run(self_inner):
-                # Monkey-patch tail_lines reference into the shared list
-                import types
-
-                orig = super()._run.__func__
-
-                def patched(s):
-                    # We need to re-implement the tail accumulation share;
-                    # easiest: just run normally — the snapshot is taken at fire time
-                    orig(s)
-
-                patched(self_inner)
-
         _watcher = LogWatcher(
             on_server_found=on_auto_server_found,
             on_menu=on_auto_menu,
@@ -1086,30 +1039,24 @@ def manual_update_check():
                 messagebox.showinfo("Updates", "Could not reach GitHub.\nCheck your internet connection.")
                 return
             if not update_available:
-                messagebox.showinfo("Up to Date", f"You're already on the latest version ({DETECTOR_VERSION}).")
+                messagebox.showinfo("Up to Date", f"You're on the latest version ({DETECTOR_VERSION}).")
                 return
             answer = messagebox.askyesno(
                 "Update Available",
                 f"A new version is available!\n\n"
-                f"  Current version : {DETECTOR_VERSION}\n"
-                f"  New version     : {remote_version}\n\n"
-                f"Download and install the update now?\n"
-                f"(The app will restart automatically.)",
+                f"  Current : {DETECTOR_VERSION}\n"
+                f"  New     : {remote_version}\n\n"
+                f"Install now? (App will restart.)",
                 icon="info",
             )
             if not answer:
                 return
             ok = apply_update(remote_source)
             if ok:
-                messagebox.showinfo(
-                    "Update Installed",
-                    f"Updated to {remote_version}!\n\n"
-                    f"A backup was saved as:\n{os.path.abspath(__file__)}.bak\n\n"
-                    f"The app will now restart.",
-                )
+                messagebox.showinfo("Updated", f"Updated to {remote_version}!\nApp will restart.")
                 _restart_app()
             else:
-                messagebox.showerror("Update Failed", "Could not write the update to disk.")
+                messagebox.showerror("Failed", "Could not write update to disk.")
 
         root.after(0, show)
 
@@ -1118,11 +1065,8 @@ def manual_update_check():
 
 # ================= BUTTON HOVER =================
 
-def on_enter(e):
-    detect_button.config(bg=BG_HOVER)
-
-def on_leave(e):
-    detect_button.config(bg=BG_BUTTON)
+def on_enter(e): detect_button.config(bg=BG_HOVER)
+def on_leave(e): detect_button.config(bg=BG_BUTTON)
 
 
 # ================= GUI =================
@@ -1140,15 +1084,12 @@ rpc_var   = tk.BooleanVar(value=_cfg.get("rpc",         False))
 debug_var = tk.BooleanVar(value=_cfg.get("debug",       False))
 sound_var = tk.BooleanVar(value=_cfg.get("sound",       True))
 
-# — Header ————————————————————————————————————————————————————————————————————
 header = tk.Frame(root, bg=BG)
 header.pack(fill="x", padx=20, pady=(18, 0))
 
 tk.Label(
-    header,
-    text="Roblox Server Detector by IsaacSets",
-    font=("Arial", 16, "bold"),
-    bg=BG, fg=ACCENT,
+    header, text="Roblox Server Detector by IsaacSets",
+    font=("Arial", 16, "bold"), bg=BG, fg=ACCENT,
 ).pack(side="left", expand=True, fill="x")
 
 if USE_COG:
@@ -1160,17 +1101,13 @@ if USE_COG:
 
 tk.Label(root, text=DETECTOR_VERSION, font=("Arial", 9), bg=BG, fg=FG_DIM).pack()
 
-# — Detect button —————————————————————————————————————————————————————————————
 detect_button = tk.Button(
-    root,
-    text="Detect Current Server",
+    root, text="Detect Current Server",
     font=("Arial", 13, "bold"),
     bg=BG_BUTTON, fg=FG,
     activebackground=BG_HOVER, activeforeground=FG,
-    relief="flat", bd=0,
-    padx=24, pady=10,
-    cursor="hand2",
-    command=detect_server,
+    relief="flat", bd=0, padx=24, pady=10,
+    cursor="hand2", command=detect_server,
 )
 detect_button.pack(pady=(12, 20))
 detect_button.bind("<Enter>", on_enter)
@@ -1179,16 +1116,13 @@ detect_button.bind("<Leave>", on_leave)
 tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=40)
 
 result_label = tk.Label(
-    root,
-    text="Press the button to detect your server.",
-    font=("Arial", 12),
-    bg=BG, fg=FG, justify="left",
+    root, text="Press the button to detect your server.",
+    font=("Arial", 12), bg=BG, fg=FG, justify="left",
 )
 result_label.pack(pady=20)
 
 tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=40)
 
-# — Settings (inline when settingscog is off) ─────────────────────────────────
 if not USE_COG:
     options_frame = tk.Frame(root, bg=BG)
     options_frame.pack(side="bottom", pady=12)
@@ -1236,13 +1170,11 @@ if not USE_COG:
 else:
     rpc_status_label = tk.Label(root, text="", bg=BG, fg=FG_DIM)
 
-# — Restore saved settings ————————————————————————————————————————————————————
 if _cfg.get("auto_detect"):
     toggle_auto_detect()
 if _cfg.get("rpc"):
     toggle_rich_presence()
 
-# — Startup update check ──────────────────────────────────────────────────────
 threading.Thread(target=_do_update_check_on_startup, daemon=True).start()
 
 root.mainloop()
