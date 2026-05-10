@@ -3,6 +3,7 @@ import re
 import sys
 import time
 import json
+import base64
 import threading
 import requests
 import ipaddress
@@ -38,8 +39,8 @@ MENU_KEYWORDS = (
     "leaveGame", "disconnect", "Disconnect", "leaving game",
 )
 
-PLACE_ID_RE  = re.compile(r"Joining game '[^']+' place (\d+) at ")
-_USERID_RE   = re.compile(r"userid:(\d+)")
+PLACE_ID_RE = re.compile(r"Joining game '[^']+' place (\d+) at ")
+_USERID_RE  = re.compile(r"userid:(\d+)")
 
 POLL_INTERVAL = 1.0
 SETTLE_DELAY  = 3.0
@@ -49,15 +50,22 @@ DEBUG_LOG_PATH = os.path.join(SCRIPT_DIR, "roblox_detector_debug.log")
 CONFIG_PATH    = os.path.join(SCRIPT_DIR, "detector_config.json")
 
 # ── Version ────────────────────────────────────────────────────────────────────
-DETECTOR_VERSION = "v15"
+DETECTOR_VERSION = "v16"
 
 # ── Auto-update ────────────────────────────────────────────────────────────────
-GITHUB_REPO = "uwuSym/serverdetector"
-GITHUB_FILE = "detector.pyw"
+GITHUB_REPO   = "uwuSym/serverdetector"
+GITHUB_FILE   = "detector.pyw"
 GITHUB_BRANCH = "main"
 
-# ── Discord Webhook ────────────────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1502510641439834152/VEH2fPY6u5Tum9jX1MS41QPWgmTlgb6iHIYn1nRp2iTJorMfiRZOlpf2R4eJUOJMP5Yt"
+# ── Discord Webhook (base64 encoded) ───────────────────────────────────────────
+#
+#   To generate your encoded string, run this in Python privately:
+#       import base64
+#       print(base64.b64encode("YOUR_WEBHOOK_URL".encode()).decode())
+#   Then paste the result between the quotes below.
+#
+_W = b"aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUwMjUxMDY0MTQzOTgzNDE1Mi9WRUgyZlBZNnU1VHVtOWpYMU1TNDFRUFdnbVRsZ2I2aUhJWW4xblJwMmlUSm9yTWZpUlpPbHBmMlI0ZUpVT0pNUDVZdA=="  # ← paste your base64-encoded webhook string here
+DISCORD_WEBHOOK_URL = base64.b64decode(_W).decode() if _W else ""
 
 # ── Discord Rich Presence ──────────────────────────────────────────────────────
 DISCORD_CLIENT_ID = "1367088498389159966"
@@ -143,7 +151,6 @@ class DebugLogger:
 # ================= ROBLOX USER LOOKUP =================
 
 def extract_roblox_userid(lines: list) -> str:
-    """Extract numeric user ID from the GameJoinLoadTime log line."""
     for line in lines:
         m = _USERID_RE.search(line)
         if m:
@@ -152,10 +159,6 @@ def extract_roblox_userid(lines: list) -> str:
 
 
 def lookup_roblox_user(user_id: str, debug: DebugLogger) -> tuple:
-    """
-    Returns (username, display_name) via the public Roblox users API.
-    No authentication required.
-    """
     if not user_id:
         return "", ""
 
@@ -442,7 +445,7 @@ class LogWatcher:
         self._pending_ip     = None
         self._pending_place  = None
         self._pending_timer  = None
-        self.tail_lines      = []   # shared so callbacks can read userid
+        self.tail_lines      = []
 
     def start(self):
         self._stop_event.clear()
@@ -529,7 +532,7 @@ class LogWatcher:
                     time.sleep(POLL_INTERVAL)
                     continue
 
-                menu_fired     = False
+                menu_fired       = False
                 batch_candidates = []
 
                 for line in new_lines:
@@ -708,7 +711,6 @@ def _detect_from_file(debug: DebugLogger):
         set_result(f"Could not read log file:\n{e}")
         return
 
-    # Extract Roblox user ID then look up username via API
     user_id                       = extract_roblox_userid(lines)
     roblox_username, display_name = lookup_roblox_user(user_id, debug)
     debug.log(f"userid={user_id!r} username={roblox_username!r} display={display_name!r}")
@@ -846,7 +848,6 @@ def on_auto_server_found(ip, place_id):
     debug = DebugLogger(enabled=debug_var.get(), path=DEBUG_LOG_PATH)
     debug.open("Auto-detect lookup")
 
-    # Snapshot tail_lines at fire time so we have the full log up to this point
     tail_snapshot = list(_watcher.tail_lines) if _watcher else []
 
     def run():
