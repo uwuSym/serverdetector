@@ -50,7 +50,7 @@ DEBUG_LOG_PATH = os.path.join(SCRIPT_DIR, "roblox_detector_debug.log")
 CONFIG_PATH    = os.path.join(SCRIPT_DIR, "detector_config.json")
 
 # ── Version ────────────────────────────────────────────────────────────────────
-DETECTOR_VERSION = "v16"
+DETECTOR_VERSION = "v17"
 
 # ── Auto-update ────────────────────────────────────────────────────────────────
 GITHUB_REPO   = "uwuSym/serverdetector"
@@ -284,6 +284,7 @@ def send_discord_webhook(
     display_name: str = "",
     thumbnail: str = "",
     auto_detected: bool = False,
+    ping: str = "N/A",
 ):
     if not DISCORD_WEBHOOK_URL:
         return
@@ -300,6 +301,7 @@ def send_discord_webhook(
         {"name": "📍 Server location", "value": f"`{location_str}`",                 "inline": True},
         {"name": "🌐 Server region",   "value": f"`{friendly}`",                     "inline": True},
         {"name": "🔌 IP address",      "value": f"`{ip}`",                           "inline": True},
+        {"name": "📶 Ping",            "value": f"`{ping}`",                         "inline": True},
         {"name": "🕒 Time",            "value": f"`{time_display}`",                 "inline": True},
         {"name": "⚙️ Version",         "value": f"`{DETECTOR_VERSION}`",             "inline": True},
         {"name": "🗺️ Game",            "value": f"`{game_name or 'N/A'}`",           "inline": True},
@@ -430,6 +432,79 @@ def build_discord_details(game_name: str, place_name: str) -> str:
     if place_name and game_name and place_name != game_name:
         return f"{game_name} — {place_name}"[:128]
     return game_name or place_name or "Playing Roblox"
+
+
+# ================= PING =================
+
+_JOB_ID_RE = re.compile(r"Joining game '([0-9a-f\-]+)'")
+
+def extract_job_id(lines: list) -> str:
+    """Extract the server Job ID from the log join line."""
+    for line in lines:
+        m = _JOB_ID_RE.search(line)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _fetch_ping_once(place_id: str, job_id: str) -> int | None:
+    """
+    Single ping fetch from the Roblox server list API.
+    Returns the ping integer, or None if the server wasn't found.
+    """
+    cursor = ""
+    while True:
+        url = (f"https://games.roblox.com/v1/games/{place_id}/servers/Public"
+               f"?limit=100&excludeFullGames=false"
+               + (f"&cursor={cursor}" if cursor else ""))
+        r = requests.get(url, timeout=6)
+        r.raise_for_status()
+        data = r.json()
+        for server in data.get("data", []):
+            if server.get("id", "").lower() == job_id.lower():
+                ping = server.get("ping")
+                if ping is not None:
+                    return int(ping)
+        cursor = data.get("nextPageCursor") or ""
+        if not cursor:
+            break
+    return None
+
+
+def lookup_ping(place_id: str, job_id: str, debug: DebugLogger,
+                samples: int = 5, interval: float = 1.0) -> str:
+    """
+    Sample the Roblox server list API {samples} times, one per second,
+    then return the average ping. Drops any failed samples.
+    Returns e.g. "73ms (avg 5)" or "N/A".
+    """
+    if not place_id or not job_id:
+        return "N/A"
+
+    debug.log(f"Averaging ping over {samples} samples for job_id={job_id!r} ...")
+    readings = []
+
+    for i in range(samples):
+        try:
+            ping = _fetch_ping_once(place_id, job_id)
+            if ping is not None:
+                readings.append(ping)
+                debug.log(f"  Sample {i + 1}/{samples}: {ping}ms")
+            else:
+                debug.log(f"  Sample {i + 1}/{samples}: server not found in list")
+        except Exception as e:
+            debug.log(f"  Sample {i + 1}/{samples}: error — {e}")
+
+        if i < samples - 1:
+            time.sleep(interval)
+
+    if not readings:
+        debug.log("  No valid ping samples collected.")
+        return "N/A"
+
+    avg = int(sum(readings) / len(readings))
+    debug.log(f"  Average ping: {avg}ms over {len(readings)} sample(s)")
+    return f"{avg}ms"
 
 
 # ================= AUTO-DETECT WATCHER =================
@@ -750,17 +825,20 @@ def _detect_from_file(debug: DebugLogger):
     set_result(format_result(friendly, city, region, ip, game_name, place_name,
                              roblox_username, display_name))
 
+    job_id = extract_job_id(lines)
+    ping   = lookup_ping(best_place, job_id, debug)
+
     send_discord_webhook(
         friendly=friendly, city=city, region=region, ip=ip,
         game_name=game_name, place_name=place_name,
         roblox_username=roblox_username, display_name=display_name,
-        thumbnail=thumbnail, auto_detected=False,
+        thumbnail=thumbnail, auto_detected=False, ping=ping,
     )
 
     if rpc_var.get() and _presence.connected:
         _presence.update(
             details=build_discord_details(game_name, place_name),
-            state=f"{city}, {region}  |  {ip}",
+            state=f"{city}, {region}  |  {ping}",
             large_image=thumbnail or "roblox",
             large_text=game_name or "Roblox",
         )
@@ -867,11 +945,14 @@ def on_auto_server_found(ip, place_id):
                                          game_name, place_name,
                                          roblox_username, display_name, auto=True))
 
+                job_id = extract_job_id(tail_snapshot)
+                ping   = lookup_ping(place_id, job_id, debug)
+
                 send_discord_webhook(
                     friendly=friendly, city=city, region=region, ip=found_ip,
                     game_name=game_name, place_name=place_name,
                     roblox_username=roblox_username, display_name=display_name,
-                    thumbnail=thumbnail, auto_detected=True,
+                    thumbnail=thumbnail, auto_detected=True, ping=ping,
                 )
 
                 if sound_var.get():
@@ -880,7 +961,7 @@ def on_auto_server_found(ip, place_id):
                 if rpc_var.get() and _presence.connected:
                     _presence.update(
                         details=build_discord_details(game_name, place_name),
-                        state=f"{city}, {region}  |  {found_ip}",
+                        state=f"{city}, {region}  |  {ping}",
                         large_image=thumbnail or "roblox",
                         large_text=game_name or "Roblox",
                     )
