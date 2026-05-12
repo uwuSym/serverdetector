@@ -50,7 +50,7 @@ DEBUG_LOG_PATH = os.path.join(SCRIPT_DIR, "roblox_detector_debug.log")
 CONFIG_PATH    = os.path.join(SCRIPT_DIR, "detector_config.json")
 
 # ── Version ────────────────────────────────────────────────────────────────────
-DETECTOR_VERSION = "v17"
+DETECTOR_VERSION = "v17.1"
 
 # ── Auto-update ────────────────────────────────────────────────────────────────
 GITHUB_REPO   = "uwuSym/serverdetector"
@@ -447,64 +447,59 @@ def extract_job_id(lines: list) -> str:
     return ""
 
 
-def _fetch_ping_once(place_id: str, job_id: str) -> int | None:
+def lookup_ping(place_id: str, job_id: str, debug: DebugLogger) -> str:
     """
-    Single ping fetch from the Roblox server list API.
-    Returns the ping integer, or None if the server wasn't found.
-    """
-    cursor = ""
-    while True:
-        url = (f"https://games.roblox.com/v1/games/{place_id}/servers/Public"
-               f"?limit=100&excludeFullGames=false"
-               + (f"&cursor={cursor}" if cursor else ""))
-        r = requests.get(url, timeout=6)
-        r.raise_for_status()
-        data = r.json()
-        for server in data.get("data", []):
-            if server.get("id", "").lower() == job_id.lower():
-                ping = server.get("ping")
-                if ping is not None:
-                    return int(ping)
-        cursor = data.get("nextPageCursor") or ""
-        if not cursor:
-            break
-    return None
-
-
-def lookup_ping(place_id: str, job_id: str, debug: DebugLogger,
-                samples: int = 5, interval: float = 1.0) -> str:
-    """
-    Sample the Roblox server list API {samples} times, one per second,
-    then return the average ping. Drops any failed samples.
-    Returns e.g. "73ms (avg 5)" or "N/A".
+    Paginate through the Roblox public server list to find the current
+    server by Job ID and return its ping. Adds a 2s delay between pages
+    to avoid rate limiting. Single scan only — no retries.
+    Returns e.g. "73ms" or "N/A".
     """
     if not place_id or not job_id:
         return "N/A"
 
-    debug.log(f"Averaging ping over {samples} samples for job_id={job_id!r} ...")
-    readings = []
+    debug.log(f"Fetching ping for job_id={job_id!r} place={place_id!r} ...")
+    cursor = ""
+    page   = 0
 
-    for i in range(samples):
-        try:
-            ping = _fetch_ping_once(place_id, job_id)
-            if ping is not None:
-                readings.append(ping)
-                debug.log(f"  Sample {i + 1}/{samples}: {ping}ms")
-            else:
-                debug.log(f"  Sample {i + 1}/{samples}: server not found in list")
-        except Exception as e:
-            debug.log(f"  Sample {i + 1}/{samples}: error — {e}")
+    try:
+        while True:
+            page += 1
+            url = (f"https://games.roblox.com/v1/games/{place_id}/servers/Public"
+                   f"?limit=100"
+                   + (f"&cursor={cursor}" if cursor else ""))
 
-        if i < samples - 1:
-            time.sleep(interval)
+            if page > 1:
+                time.sleep(2.0)
 
-    if not readings:
-        debug.log("  No valid ping samples collected.")
+            try:
+                r = requests.get(url, timeout=8)
+                if r.status_code == 429:
+                    debug.log(f"  Page {page}: rate limited — giving up.")
+                    return "N/A"
+                r.raise_for_status()
+            except Exception as e:
+                debug.log(f"  Page {page}: request failed — {e}")
+                return "N/A"
+
+            data    = r.json()
+            servers = data.get("data", [])
+            debug.log(f"  Page {page}: {len(servers)} servers")
+
+            for server in servers:
+                if server.get("id", "").lower() == job_id.lower():
+                    ping = server.get("ping")
+                    if ping is not None:
+                        debug.log(f"  Found on page {page}: ping={ping}ms")
+                        return f"{int(ping)}ms"
+
+            cursor = data.get("nextPageCursor") or ""
+            if not cursor:
+                debug.log("  Server not found in public list.")
+                return "N/A"
+
+    except Exception as e:
+        debug.log(f"  Ping lookup error: {e}")
         return "N/A"
-
-    avg = int(sum(readings) / len(readings))
-    debug.log(f"  Average ping: {avg}ms over {len(readings)} sample(s)")
-    return f"{avg}ms"
 
 
 # ================= AUTO-DETECT WATCHER =================
@@ -836,9 +831,10 @@ def _detect_from_file(debug: DebugLogger):
     )
 
     if rpc_var.get() and _presence.connected:
+        rpc_state = f"{city}, {region}  |  {ping}" if ping != "N/A" else f"{city}, {region}"
         _presence.update(
             details=build_discord_details(game_name, place_name),
-            state=f"{city}, {region}  |  {ping}",
+            state=rpc_state,
             large_image=thumbnail or "roblox",
             large_text=game_name or "Roblox",
         )
@@ -959,9 +955,10 @@ def on_auto_server_found(ip, place_id):
                     root.after(0, play_alert)
 
                 if rpc_var.get() and _presence.connected:
+                    rpc_state = f"{city}, {region}  |  {ping}" if ping != "N/A" else f"{city}, {region}"
                     _presence.update(
                         details=build_discord_details(game_name, place_name),
-                        state=f"{city}, {region}  |  {ping}",
+                        state=rpc_state,
                         large_image=thumbnail or "roblox",
                         large_text=game_name or "Roblox",
                     )
