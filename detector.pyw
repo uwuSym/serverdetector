@@ -50,7 +50,7 @@ DEBUG_LOG_PATH = os.path.join(SCRIPT_DIR, "roblox_detector_debug.log")
 CONFIG_PATH    = os.path.join(SCRIPT_DIR, "detector_config.json")
 
 # ── Version ────────────────────────────────────────────────────────────────────
-DETECTOR_VERSION = "v17.2"
+DETECTOR_VERSION = "Beta - 17.0"
 
 # ── Auto-update ────────────────────────────────────────────────────────────────
 GITHUB_REPO   = "uwuSym/serverdetector"
@@ -1167,7 +1167,7 @@ header = tk.Frame(root, bg=BG)
 header.pack(fill="x", padx=20, pady=(18, 0))
 
 tk.Label(
-    header, text="I'm watching you.",
+    header, text="Batteries not included",
     font=("Arial", 16, "bold"), bg=BG, fg=ACCENT,
 ).pack(side="left", expand=True, fill="x")
 
