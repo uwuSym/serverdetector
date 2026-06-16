@@ -7,7 +7,7 @@ LOG_DIR      := EnvGet("LOCALAPPDATA") . "\Roblox\logs"
 SCRIPT_DIR   := A_ScriptDir
 CONFIG_PATH  := SCRIPT_DIR . "\detector_config.ini"
 DEBUG_PATH   := SCRIPT_DIR . "\roblox_detector_debug.log"
-VERSION      := "Beta - 17.0 (AHK)"
+VERSION      := "AHK Beta - 2.0 | Auto-Detect Fix"
 
 ; ── Auto-update (set these to your repo) ─────────────────────────────────────
 GITHUB_REPO   := "uwuSym/serverdetector"   ; user/repo
@@ -35,10 +35,11 @@ global g_IpCache  := Map()
 global g_DebugOn  := false
 global g_AutoOn   := false
 global g_SoundOn  := true
-global g_WatchPos := 0
-global g_WatchFile := ""
-global g_LastIP   := ""
-global g_TailLines := []
+global g_WatchPos    := 0
+global g_WatchFile   := ""
+global g_LastIP      := ""
+global g_LastPlaceID := ""
+global g_TailLines   := []
 
 ; ── Webhook (paste your base64-encoded webhook URL here, same as Python version) ──
 WEBHOOK_B64 := "aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTUwMjUxMDY0MTQzOTgzNDE1Mi9WRUgyZlBZNnU1VHVtOWpYMU1TNDFRUFdnbVRsZ2I2aUhJWW4xblJwMmlUSm9yTWZpUlpPbHBmMlI0ZUpVT0pNUDVZdA=="
@@ -390,11 +391,12 @@ DetectServer() {
 ; ================= AUTO-DETECT WATCHER =================
 
 StartWatcher() {
-    global g_WatchFile, g_WatchPos, g_LastIP, g_TailLines
-    g_WatchFile  := ""
-    g_WatchPos   := 0
-    g_LastIP     := ""
-    g_TailLines  := []
+    global g_WatchFile, g_WatchPos, g_LastIP, g_LastPlaceID, g_TailLines
+    g_WatchFile   := ""
+    g_WatchPos    := 0
+    g_LastIP      := ""
+    g_LastPlaceID := ""
+    g_TailLines   := []
     SetTimer(WatcherTick, 1000)
     SetResult("Auto-detect enabled — waiting for a game join...")
 }
@@ -405,7 +407,7 @@ StopWatcher() {
 }
 
 WatcherTick() {
-    global g_WatchFile, g_WatchPos, g_LastIP, g_TailLines
+    global g_WatchFile, g_WatchPos, g_LastIP, g_LastPlaceID, g_TailLines
 
     current := LatestLogFile()
     if !current
@@ -453,26 +455,21 @@ WatcherTick() {
     loop parse newContent, "`n", "`r"
         newLines.Push(A_LoopField)
 
-    menuFired    := false
-    latestIP     := ""
-    latestPlace  := ""
+    latestIP    := ""
+    latestPlace := ""
 
-    for line in newLines {
+    for lineIdx, line in newLines {
         g_TailLines.Push(line)
 
-        ; Menu / disconnect detection
-        if !menuFired {
-            for kw in MENU_KW {
-                if InStr(line, kw) {
-                    menuFired := true
-                    g_LastIP  := ""
-                    SetResult("In menu — waiting for next game...")
-                    break
-                }
+        ; Menu / disconnect — reset last IP so next server join fires fresh
+        for kw in MENU_KW {
+            if InStr(line, kw) {
+                g_LastIP      := ""
+                g_LastPlaceID := ""
+                SetResult("In menu — waiting for next game...")
+                break
             }
         }
-        if menuFired
-            continue
 
         ; Game server keyword match
         matched := false
@@ -488,8 +485,18 @@ WatcherTick() {
         pos := 1
         while pos := RegExMatch(line, "\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", &m, pos) {
             if IsPublicIP(m[0]) {
-                latestIP    := m[0]
-                latestPlace := ExtractPlaceID(g_TailLines, g_TailLines.Length)
+                latestIP := m[0]
+                ; Search backward through new lines first (catches teleport place IDs)
+                batchPlace := ""
+                i2 := lineIdx
+                while i2 >= 1 {
+                    if RegExMatch(newLines[i2], "Joining game '[^']+' place (\d+) at ", &pm) {
+                        batchPlace := pm[1]
+                        break
+                    }
+                    i2--
+                }
+                latestPlace := batchPlace ? batchPlace : ExtractPlaceID(g_TailLines, g_TailLines.Length)
                 break
             }
             pos += StrLen(m[0])
@@ -500,10 +507,11 @@ WatcherTick() {
     while g_TailLines.Length > 5000
         g_TailLines.RemoveAt(1)
 
-    if latestIP && latestIP != g_LastIP {
-        g_LastIP := latestIP
-        DebugLog("Auto-detect: new IP " . latestIP . " place=" . latestPlace)
-        ; Settle delay via one-shot timer (3s)
+    ; Fire when IP changes OR place ID changes (catches same-IP teleports)
+    if latestIP && (latestIP != g_LastIP || (latestPlace && latestPlace != g_LastPlaceID)) {
+        g_LastIP      := latestIP
+        g_LastPlaceID := latestPlace
+        DebugLog("Auto-detect: new IP=" . latestIP . " place=" . latestPlace)
         capturedIP    := latestIP
         capturedPlace := latestPlace
         SetTimer(() => AutoLookup(capturedIP, capturedPlace), -3000)
@@ -511,7 +519,7 @@ WatcherTick() {
 }
 
 AutoLookup(ip, placeID) {
-    global g_SoundOn
+    global g_SoundOn, g_TailLines
 
     result := LookupIP(ip)
     if !result.Count {
